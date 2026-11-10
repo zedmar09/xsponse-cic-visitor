@@ -48,6 +48,10 @@ const MAX_BYTES = 20 * 1024 * 1024;
 const ACCEPTED = ["image/png", "image/jpeg", "image/webp"];
 const STREETS = process.env.NEXT_PUBLIC_MAP_STYLE_URL || "https://tiles.openfreemap.org/styles/liberty";
 const LIGHT = "https://tiles.openfreemap.org/styles/positron";
+// Visitor map setup hides indoor device and navigation tools without deleting
+// existing device placements, routes or saved floor data.
+const SHOW_INDOOR_DEVICE_TOOLS = false;
+const SHOW_INDOOR_NAVIGATION_TOOLS = false;
 type Mode = "floor" | "street";
 type ActivePlan = { record: FloorPlanRecord; url: string };
 type Feedback = { type: "success" | "error"; message: string } | null;
@@ -547,6 +551,8 @@ export function MapWorkspace() {
   };
   const areas=record?.areas??[];
   const markers=record?.markers??[];
+  const visibleMarkers=SHOW_INDOOR_DEVICE_TOOLS?markers:
+    markers.filter(marker=>marker.kind!=="camera"&&marker.kind!=="device");
   const portals=record?.portals??[];
   const auditBuildingId=hierarchy?.building.id;
   const navigationReport=useMemo(()=>buildNavigationAudit(
@@ -1232,9 +1238,6 @@ type the exact floor name. Other floors will be preserved.`);
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-2">
-        <span className="hidden rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-800 md:inline">
-          No building measurements needed
-        </span>
         <Button size="sm" variant="outline" aria-label={panelOpen?"Hide editor":"Show editor"}
           onClick={()=>setPanelOpen(v=>!v)}>
           {panelOpen?<PanelLeftClose/>:<PanelLeftOpen/>}<span className="hidden sm:inline">{panelOpen?"Hide":"Show"} editor</span>
@@ -1287,7 +1290,7 @@ type the exact floor name. Other floors will be preserved.`);
             </p>
             <p className="mt-1 text-xs text-indigo-800">
               {floors.filter(f=>f.locationId===selectedSavedLocationId).length} indoor map/floor(s) assigned.
-              Select a floor to align its entire indoor mapping: rooms, walkable areas, doors, stairs/elevators and device markers.
+              Select a floor to align its indoor mapping: rooms, walkable areas, doors and stairs/elevators.
             </p>
             <Button size="sm" className="mt-2 w-full"
               onClick={()=>{selectIndoorLocation(selectedSavedLocationId);setView("floor");setStatus("loading");}}>
@@ -1584,7 +1587,7 @@ type the exact floor name. Other floors will be preserved.`);
             activeId={record.id} busy={saving||loading}
             onSelect={id=>{void switchFloor(id)}} onAdd={openAddFloor}/>}
 
-          {selectedIndoorLocationId&&<DeviceInventory
+          {selectedIndoorLocationId&&SHOW_INDOOR_DEVICE_TOOLS&&<DeviceInventory
             locationName={savedLocations.find(loc=>loc.id===selectedIndoorLocationId)?.name??"Location"}
             floorName={record?.locationId===selectedIndoorLocationId?(hierarchy?.floor.name??record.name):null}
             devices={locationDevices}
@@ -1692,6 +1695,7 @@ type the exact floor name. Other floors will be preserved.`);
               onUndo={drawing.undo}
               onRedo={drawing.redo}
               onCancel={()=>chooseTool("move")}/>}
+            {SHOW_INDOOR_DEVICE_TOOLS&&<>
             <h3 className="mt-4 text-sm font-semibold">Device markers</h3>
             <p className="mt-1 text-xs text-muted-foreground">Custom device placement improvements are postponed.</p>
             <div className="mt-3 grid grid-cols-2 gap-2">
@@ -1714,6 +1718,7 @@ type the exact floor name. Other floors will be preserved.`);
                 <Button size="sm" variant="ghost" onClick={()=>chooseTool("move")}>Cancel</Button>
               </div>
             </div>}
+            </>}
           </details>
 
           {record&&hierarchy&&<details ref={stairSectionRef} className="rounded-xl border border-amber-200 bg-amber-50/40 p-3">
@@ -1868,7 +1873,7 @@ type the exact floor name. Other floors will be preserved.`);
               </p>}
           </details>}
 
-          {record&&hierarchy&&<details className="rounded-xl border border-sky-200 p-3">
+          {record&&hierarchy&&SHOW_INDOOR_NAVIGATION_TOOLS&&<details className="rounded-xl border border-sky-200 p-3">
             <summary className="cursor-pointer text-sm font-semibold">
               5. Navigation &amp; connectivity
             </summary>
@@ -1903,9 +1908,9 @@ type the exact floor name. Other floors will be preserved.`);
 
           {record && <details className="rounded-xl border border-border p-3">
             <summary className="cursor-pointer text-sm font-semibold">
-              Saved on this floor plan · {areas.length+portals.length+markers.length} items
+              Saved on this floor plan · {areas.length+portals.length+visibleMarkers.length} items
             </summary>
-            {areas.length===0&&portals.length===0&&markers.length===0
+            {areas.length===0&&portals.length===0&&visibleMarkers.length===0
               ?<p className="mt-2 text-xs text-muted-foreground">Draw your first room to begin.</p>
               :<div className="mt-3 space-y-2">
                 {areas.map(a=><div key={a.id} className="flex items-center gap-2 rounded-lg bg-muted/70 p-2">
@@ -1947,7 +1952,7 @@ type the exact floor name. Other floors will be preserved.`);
                     onClick={()=>{void deleteDoor(p.id);}}
                     className="rounded p-1 text-red-600 hover:bg-white"><Trash2 className="size-3.5"/></button>
                 </div>)}
-                {markers.map(m=>{
+                {visibleMarkers.map(m=>{
                   const parent=areas.find(a=>a.kind==="room"&&pointInRoom(m.point,a.points));
                   return <div key={m.id} className="flex items-center gap-2 rounded-lg bg-muted/70 p-2">
                     <Dot color={m.kind==="entrance"?"bg-teal-500":m.kind==="exit"?"bg-red-600":m.kind==="camera"?"bg-purple-600":"bg-orange-500"}/>
@@ -1980,8 +1985,6 @@ type the exact floor name. Other floors will be preserved.`);
                     ["doorwayShapes","Doorway colors & outlines"],
                     ["entranceExitMarkers","Entrance / exit icons & colors"],
                     ["stairLabels","Staircase & elevator labels"],
-                    ["deviceMarkers","Camera & device icons"],
-                    ["guideLine","Navigation guide lines"],
                   ] as const).map(([key,label])=>
                     <label key={key} className="flex items-center justify-between gap-2 text-xs">
                       <span>{label}</span>
@@ -2055,11 +2058,11 @@ type the exact floor name. Other floors will be preserved.`);
           <FloorPlanCanvas key={record.planId} imageUrl={plan.url} width={record.width} height={record.height}
             floorId={hierarchy?.floor.id??record.planId}
             staircases={staircases.filter(stair=>!(stair.id===editingStairId&&tool==="staircase"))}
-            navigationSelection={navSelection} navigationFocusRequest={focusRoute} displaySettings={displaySettings}
-            areas={areas.filter(a=>a.id!==editingAreaId)} markers={markers}
-             placedDevices={locationDevices.filter(device=>device.floorId===record.id)}
+            navigationSelection={SHOW_INDOOR_NAVIGATION_TOOLS?navSelection:null} navigationFocusRequest={focusRoute} displaySettings={displaySettings}
+            areas={areas.filter(a=>a.id!==editingAreaId)} markers={visibleMarkers}
+             placedDevices={SHOW_INDOOR_DEVICE_TOOLS?locationDevices.filter(device=>device.floorId===record.id):[]}
              deviceResetKey={deviceResetKey}
-             onDeviceDrop={dropLocationDevice} onDeviceMove={dropLocationDevice}
+             onDeviceDrop={SHOW_INDOOR_DEVICE_TOOLS?dropLocationDevice:()=>{}} onDeviceMove={SHOW_INDOOR_DEVICE_TOOLS?dropLocationDevice:()=>{}}
              selectedDeviceId={selectedDeviceId} onDeviceSelect={setSelectedDeviceId}
              onDeviceResize={(deviceId,sizePx)=>configureDevice(deviceId,{sizePx})}
             portals={portals.filter(p=>p.id!==editingDoorId)} drawing={isArea(tool)||tool==="staircase"?draft:[]}
@@ -2078,7 +2081,7 @@ type the exact floor name. Other floors will be preserved.`);
               <FileImage className="mx-auto size-11 text-primary"/>
               <h2 className="mt-4 text-xl font-bold">{loading?"Opening saved floors…":"Select a location to set up indoor maps"}</h2>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                Choose an existing outdoor location in the sidebar, then create or open its indoor maps and floors to configure rooms, walking areas, doors and navigation.
+                Choose an existing outdoor location in the sidebar, then create or open its indoor maps and floors to configure rooms, walking areas, doors and stairs/elevators.
               </p>
               <Button className="mt-5 w-full" disabled={saving||loading||!selectedIndoorLocationId} onClick={openReplaceFloor}>
                 <Upload/> Choose floor-plan picture
@@ -2105,10 +2108,9 @@ type the exact floor name. Other floors will be preserved.`);
               onClick={()=>setFit(k=>k+1)}><LocateFixed/> Show full plan</Button>
           </div>
         </>}
-        {view==="street"&&<div className="pointer-events-none absolute top-4 left-4 z-10 rounded-lg bg-white/95 p-3 text-xs shadow">
+        {view==="street"&&(placingFloor||pickOnMap)&&<div className="pointer-events-none absolute top-4 left-4 z-10 rounded-lg bg-white/95 p-3 text-xs shadow">
           {placingFloor?"Floor placement · Click map to choose its centre":
-             pickOnMap?"Pick mode · Click a map point to create a location":
-             "Outdoor map · Select a floor to position all indoor details (floor-plan image optional)"}
+             "Pick mode · Click a map point to create a location"}
         </div>}
         {status==="error" && (view==="street"||record) &&
           <div className="absolute inset-x-4 bottom-20 z-10 mx-auto max-w-md rounded-lg border border-red-200 bg-white p-4 text-sm text-red-700 shadow">
