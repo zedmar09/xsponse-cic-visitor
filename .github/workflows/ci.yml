@@ -1,0 +1,59 @@
+name: Validate app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Use Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Dependency health report
+        run: |
+          echo "=== Outdated direct dependencies ==="
+          npm outdated --depth=0 || true
+          echo "=== ESLint peer requirements ==="
+          npm view eslint-config-next@16.4.3 peerDependencies --json || true
+          echo "=== Security audit ==="
+          npm audit --json > /tmp/indoor-map-audit.json || true
+          node -e "const r=require('/tmp/indoor-map-audit.json'); console.log('Vulnerabilities:',JSON.stringify(r.metadata?.vulnerabilities||{})); console.log('Affected packages:',Object.keys(r.vulnerabilities||{}).join(', ')||'none'); if(r.error) console.log('Audit error:',r.error.message)"
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Geometry regression tests
+        run: npm run test:geometry
+      - name: Production build
+        run: npm run build
+      - name: Verify MapLibre worker deployment assets
+        run: |
+          test -s public/vendor/maplibre-gl/maplibre-gl-worker.mjs
+          test -f public/vendor/maplibre-gl/maplibre-gl-shared.mjs
+      - name: Smoke test worker HTTP response
+        run: |
+          npm run start >/tmp/next-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill $server_pid 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 25); do
+            if curl -fsS http://127.0.0.1:3000/vendor/maplibre-gl/maplibre-gl-worker.mjs -o /tmp/maplibre-worker.mjs; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          test -s /tmp/maplibre-worker.mjs
+          curl -fsS http://127.0.0.1:3000/vendor/maplibre-gl/maplibre-gl-shared.mjs >/dev/null
