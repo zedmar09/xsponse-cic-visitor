@@ -12,6 +12,17 @@ test("outdoor editor omits the default instruction and measurements badge",()=>{
   assert.match(workspace,/Pick mode · Click a map point to create a location/);
 });
 
+test("visitor workspace uses the light outdoor map and edge-mounted editor toggle",()=>{
+  assert.match(workspace,/const \[streetStyle,setStreetStyle\]=useState\(LIGHT\);/);
+  assert.doesNotMatch(workspace,/Indoor Map Studio/);
+  assert.doesNotMatch(workspace,/Buildings · Floors · Rooms · Doorways/);
+  assert.doesNotMatch(workspace,/<header/);
+  assert.match(workspace,/aria-label="Hide editor"/);
+  assert.match(workspace,/aria-label="Show editor"/);
+  assert.match(workspace,/top-1\/2/);
+  assert.match(workspace,/left-full/);
+});
+
 test("visitor indoor setup does not expose device management or placement",()=>{
   assert.match(workspace,/const SHOW_INDOOR_DEVICE_TOOLS = false;/);
   assert.match(workspace,/selectedIndoorLocationId&&SHOW_INDOOR_DEVICE_TOOLS&&<DeviceInventory/);

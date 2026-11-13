@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import NextImage from "next/image";
 import {
   Camera, CheckCircle2, ChevronRight, Download, DoorOpen, FileImage,
   Footprints, Layers3, LocateFixed, Map as MapIcon, MapPinned,
@@ -7,6 +8,9 @@ import {
   Settings2, Trash2, Undo2, Redo2, Upload, X, Route,
 } from "lucide-react";
 import { MapCanvas, type FloorPlacementPreview, type MapStatus } from "@/components/map/map-canvas";
+import { VisitorWindow } from "@/components/map/visitor-window";
+import { VisitorLogWindow } from "@/components/map/visitor-log-window";
+import {VisitorAlert} from "@/components/map/visitor-alert";
 import { defaultFloorPlacement, floorImageCorners, floorPlacementError, floorPlacementHeight, resizeFloorHeight, resizeFloorWidth, scaleFloorProportionally, type OutdoorFloorPlacement } from "@/lib/outdoor-floor-placement";
 import { OutdoorLocationSearch } from "@/components/map/outdoor-location-search";
 import { OutdoorLocationManager } from "@/components/map/outdoor-location-manager";
@@ -43,6 +47,7 @@ import { buildOutdoorNavigationOverlay,outdoorNavigationSummary } from "@/lib/ou
 import { outdoorNavigationScope,outdoorNavigationProblems } from "@/lib/outdoor-navigation-connectivity";
 import { verticalKind, matchVerticalFloors } from "@/lib/vertical-connections";
 import { DEFAULT_DISPLAY_SETTINGS, DISPLAY_SETTINGS_KEY, parseDisplaySettings, type MapDisplaySettings } from "@/lib/map-display-settings";
+import {useOutdoorVisitorSimulation} from "@/lib/use-outdoor-visitor-simulation";
 
 const MAX_BYTES = 20 * 1024 * 1024;
 const ACCEPTED = ["image/png", "image/jpeg", "image/webp"];
@@ -105,7 +110,7 @@ export function MapWorkspace() {
   const doorSectionRef=useRef<HTMLDetailsElement>(null);
   const stairSectionRef=useRef<HTMLDetailsElement>(null);
   const [view,setView]=useState<Mode>("floor");
-  const [streetStyle,setStreetStyle]=useState(STREETS);
+  const [streetStyle,setStreetStyle]=useState(LIGHT);
   const [status,setStatus]=useState<MapStatus>("loading");
   const [panelOpen,setPanelOpen]=useState(true);
   const [resetStreet,setResetStreet]=useState(0);
@@ -182,11 +187,10 @@ export function MapWorkspace() {
       (first?defaultFloorPlacement(location.longitude,location.latitude):null));
     setPlacingFloor(false);
     setSearchChoice(null);
-    const centre=first?.outdoorPlacement;
     setStreetTarget(previous=>({
       ...asOutdoorSearchTarget(location),
-      longitude:centre?.longitude??location.longitude,
-      latitude:centre?.latitude??location.latitude,
+      longitude:location.longitude,
+      latitude:location.latitude,
       zoom:Math.max(19,location.zoom),
       requestId:(previous?.requestId??0)+1,
     }));
@@ -373,7 +377,7 @@ export function MapWorkspace() {
   const placementPreviews=useMemo<FloorPlacementPreview[]>(()=>
     floors.filter(f=>f.locationId===selectedSavedLocationId&&
       (f.id===placementFloorId||visibleFloorIds.includes(f.id)||
-        ((showAllIndoorFloors||outdoorNavigationEnabled)&&Boolean(f.outdoorPlacement))))
+        Boolean(f.outdoorPlacement)))
       .flatMap(f=>{
         const alignment=f.id===placementFloorId?placementDraft:f.outdoorPlacement;
         if(!alignment||floorPlacementError(alignment))return [];
@@ -395,7 +399,7 @@ export function MapWorkspace() {
           }),
         }];
       }),[floors,staircases,selectedSavedLocationId,visibleFloorIds,
-        placementFloorId,placementDraft,showAllIndoorFloors,outdoorNavigationEnabled,outdoorDevices]);
+        placementFloorId,placementDraft,outdoorDevices]);
   // The INDOOR graph is not limited to floors with a saved outdoor position.
   // Otherwise a valid journey via an intermediate (as-yet unplaced) floor
   // falsely reports "No validated route" on Street map.
@@ -408,7 +412,7 @@ export function MapWorkspace() {
   // reused the active Indoor plan's stair list, which is empty or for the
   // WRONG group when arriving directly on Street map after a page reload.
   useEffect(()=>{
-    if(!outdoorNavigationEnabled||!selectedSavedLocationId)return;
+    if(!selectedSavedLocationId)return;
     let cancelled=false;
     const {buildingIds}=outdoorNavigationScope(floors,selectedSavedLocationId);
     const key=`${selectedSavedLocationId}:${buildingIds.join("|")}`;
@@ -423,9 +427,11 @@ export function MapWorkspace() {
         });
       });
     return ()=>{cancelled=true;};
-  },[outdoorNavigationEnabled,selectedSavedLocationId,floors]);
+  },[selectedSavedLocationId,floors]);
   const outdoorConnectionsLoaded=outdoorConnectionSnapshot?.key===outdoorConnectionKey;
-  const outdoorStairs=outdoorConnectionsLoaded?outdoorConnectionSnapshot!.stairs:[];
+  const outdoorStairs=useMemo(()=>outdoorConnectionsLoaded?
+    outdoorConnectionSnapshot?.stairs??[]:[],
+    [outdoorConnectionsLoaded,outdoorConnectionSnapshot]);
   const outdoorNavReady=outdoorNavigationEnabled&&outdoorConnectionsLoaded&&
     !outdoorConnectionSnapshot?.error;
   const outdoorNavAudit=useMemo(()=>buildNavigationAudit(
@@ -461,6 +467,13 @@ export function MapWorkspace() {
     outdoorRoute,outdoorRouteSteps,new Set(outdoorNavFloors.map(f=>
       f.hierarchy?.floor.id??f.planId))),
     [outdoorRoute,outdoorRouteSteps,outdoorNavFloors]);
+  const visitorSimulation=useOutdoorVisitorSimulation({
+    locationId:selectedSavedLocationId,
+    floors:outdoorNavFloors,
+    stairs:outdoorStairs,
+    ready:Boolean(selectedSavedLocationId&&outdoorConnectionsLoaded&&
+      !outdoorConnectionSnapshot?.error),
+  });
   const outdoorFloorName=(floorId:string)=>{
     const found=outdoorNavFloors.find(f=>(f.hierarchy?.floor.id??f.planId)===floorId);
     return found?.hierarchy?.floor.name??found?.name??"Floor";
@@ -1227,27 +1240,10 @@ type the exact floor name. Other floors will be preserved.`);
   return <main className="flex h-dvh min-h-[420px] flex-col overflow-hidden bg-background text-foreground">
     <input ref={fileInput} aria-label="Upload floor-plan picture" type="file" className="sr-only" tabIndex={-1}
       accept=".png,.jpg,.jpeg,.webp,image/png,image/jpeg,image/webp" onChange={e=>{void upload(e)}}/>
-    <header className="z-20 flex h-16 shrink-0 items-center justify-between border-b border-border bg-white px-4 sm:px-6">
-      <div className="flex min-w-0 items-center gap-3">
-        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary text-white">
-          <MapPinned className="size-5"/>
-        </span>
-        <div className="min-w-0">
-          <h1 className="truncate text-sm font-bold sm:text-base">Indoor Map Studio</h1>
-          <p className="hidden text-xs text-muted-foreground sm:block">Buildings · Floors · Rooms · Doorways</p>
-        </div>
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <Button size="sm" variant="outline" aria-label={panelOpen?"Hide editor":"Show editor"}
-          onClick={()=>setPanelOpen(v=>!v)}>
-          {panelOpen?<PanelLeftClose/>:<PanelLeftOpen/>}<span className="hidden sm:inline">{panelOpen?"Hide":"Show"} editor</span>
-        </Button>
-      </div>
-    </header>
-
     <div className="relative flex min-h-0 flex-1">
-      {panelOpen && <aside className="z-10 w-[340px] shrink-0 overflow-y-auto border-r border-border bg-white px-4 py-5 max-sm:absolute max-sm:inset-y-0 max-sm:left-0 max-sm:shadow-xl"
-        aria-label="Indoor map setup tools">
+      {panelOpen && <div className="relative z-20 h-full w-[340px] shrink-0 max-sm:absolute max-sm:inset-y-0 max-sm:left-0 max-sm:w-[calc(100vw-2rem)]">
+        <aside id="map-editor-panel" className="h-full w-full overflow-y-auto border-r border-border bg-white px-4 py-5 max-sm:shadow-xl"
+          aria-label="Indoor map setup tools">
         <div className="mb-4 grid grid-cols-2 gap-2 rounded-lg bg-muted p-1">
           <button type="button" onClick={()=>{setPickOnMap(false);setView("floor");setStatus("loading")}}
             aria-pressed={view==="floor"} className={cn("rounded-md px-3 py-2 text-xs font-semibold",view==="floor"?"bg-white shadow-sm":"text-muted-foreground")}>
@@ -2036,9 +2032,22 @@ type the exact floor name. Other floors will be preserved.`);
           feedback.type==="error"?"border-red-200 bg-red-50 text-red-700":"border-emerald-200 bg-emerald-50 text-emerald-800")}>
           {feedback.message}
         </div>}
-      </aside>}
+        </aside>
+        <Button type="button" size="icon" variant="outline" aria-label="Hide editor"
+          aria-controls="map-editor-panel" aria-expanded="true" title="Hide editor"
+          className="absolute left-full top-1/2 z-20 -translate-y-1/2 rounded-l-none border-l-0 bg-white shadow-md"
+          onClick={()=>setPanelOpen(false)}>
+          <PanelLeftClose/>
+        </Button>
+      </div>}
+      {!panelOpen&&<Button type="button" size="icon" variant="outline" aria-label="Show editor"
+        aria-controls="map-editor-panel" aria-expanded="false" title="Show editor"
+        className="absolute left-0 top-1/2 z-20 -translate-y-1/2 rounded-l-none border-l-0 bg-white shadow-md"
+        onClick={()=>setPanelOpen(true)}>
+        <PanelLeftOpen/>
+      </Button>}
 
-      <section className="relative min-w-0 flex-1 overflow-hidden bg-[#e8ebf0]" aria-label="Floor plan editor map">
+      <section className="relative isolate min-w-0 flex-1 overflow-hidden bg-[#e8ebf0]" aria-label="Floor plan editor map">
         {view==="street" ?
           <MapCanvas styleUrl={streetStyle} recenterKey={resetStreet} focusTarget={streetTarget}
             savedLocations={savedLocations} selectedSavedLocationId={selectedSavedLocationId}
@@ -2046,6 +2055,8 @@ type the exact floor name. Other floors will be preserved.`);
             onMapPointPick={pickOutdoorMapPoint} onStatusChange={onStatus}
             placementPreviews={placementPreviews} placingFloor={placingFloor}
             outdoorRouteOverlay={outdoorNavigationEnabled?outdoorRouteOverlay:null}
+            visitorSnapshots={visitorSimulation.visitors}
+            restrictedRoom={visitorSimulation.restrictedRoom}
             onNavigationRoomPick={setRouteRoomFromMap}
             editableFloorId={placementUnlocked?placementFloorId:null}
             proportionalResize={lockProportions} transformMode={placementEditMode}
@@ -2089,6 +2100,16 @@ type the exact floor name. Other floors will be preserved.`);
               <p className="mt-2 text-xs text-muted-foreground">PNG, JPG or WebP · Maximum 20 MB</p>
             </div>
           </div>}
+        {view==="street"&&<div aria-label="XSPONSE branding"
+          className="pointer-events-none absolute left-4 top-4 z-20 rounded-lg border border-white/80 bg-white/95 px-3 py-2 shadow-md backdrop-blur-sm">
+          <NextImage src="/xsponse_logo.png" alt="XSPONSE" width={170} height={28} priority
+            className="h-auto w-[170px]"/>
+        </div>}
+        {view==="street"&&selectedSavedLocationId&&<VisitorWindow/>}
+        {view==="street"&&selectedSavedLocationId&&<VisitorLogWindow key={selectedSavedLocationId}
+          visitors={visitorSimulation.visitors} placements={placementPreviews}/>}
+        {view==="street"&&visitorSimulation.alert&&<VisitorAlert
+          alert={visitorSimulation.alert} onDismiss={visitorSimulation.dismissAlert}/>}
         {record && view==="floor" && <>
           <div className="pointer-events-none absolute top-4 left-4 z-10 max-w-[66%] rounded-xl border border-white/70 bg-white/95 px-4 py-3 shadow-lg">
             <p className="truncate text-sm font-semibold text-slate-900">
@@ -2108,7 +2129,7 @@ type the exact floor name. Other floors will be preserved.`);
               onClick={()=>setFit(k=>k+1)}><LocateFixed/> Show full plan</Button>
           </div>
         </>}
-        {view==="street"&&(placingFloor||pickOnMap)&&<div className="pointer-events-none absolute top-4 left-4 z-10 rounded-lg bg-white/95 p-3 text-xs shadow">
+        {view==="street"&&(placingFloor||pickOnMap)&&<div className="pointer-events-none absolute top-[68px] left-4 z-10 rounded-lg bg-white/95 p-3 text-xs shadow">
           {placingFloor?"Floor placement · Click map to choose its centre":
              "Pick mode · Click a map point to create a location"}
         </div>}

@@ -50,3 +50,105 @@ body { background: var(--background); color: var(--foreground); }
 .maplibregl-ctrl-top-right { margin-top: 12px; margin-right: 12px; }
 .maplibregl-ctrl-group { border-radius: 10px; overflow: hidden; }
 .maplibregl-ctrl-attrib { font-size: 10px; }
+
+/* The 14px dot IS the marker box: its centre is the visitor's exact fix, so
+   the position never visually spills over a wall. The avatar card sits to the
+   right of the dot and shows the visitor's current room. */
+/* Never set `position` here: MapLibre positions markers with
+   `.maplibregl-marker { position: absolute }`. Overriding it with `relative`
+   puts every marker in normal flow, so each visitor was drawn offset by the
+   heights of the markers before it (outside the floor, across walls). */
+.visitor-map-marker {
+  --visitor-color: #2563eb;
+  width: 14px;
+  height: 14px;
+}
+.visitor-map-marker__dot {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border: 2.5px solid white;
+  border-radius: 999px;
+  background: var(--visitor-color);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--visitor-color) 22%, transparent),
+    0 1px 4px rgb(15 23 42 / 45%);
+}
+.visitor-map-marker__pulse {
+  position: absolute;
+  inset: -6px;
+  z-index: 1;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  pointer-events: none;
+}
+.visitor-map-marker__card {
+  position: absolute;
+  top: 50%;
+  left: calc(100% + 6px);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  max-width: 220px;
+  padding: 3px 9px 3px 3px;
+  transform: translateY(-50%);
+  border: 1.5px solid var(--visitor-color);
+  border-radius: 999px;
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 2px 8px rgb(15 23 42 / 22%);
+  white-space: nowrap;
+  pointer-events: none;
+  transition: border-color 160ms ease;
+}
+.visitor-map-marker__avatar,
+.visitor-map-marker__fallback {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+}
+.visitor-map-marker__avatar { object-fit: cover; }
+.visitor-map-marker__avatar[hidden] { display: none; }
+.visitor-map-marker__fallback {
+  display: grid;
+  place-items: center;
+  background: #334155;
+  color: white;
+  font-size: 9px;
+  font-weight: 800;
+}
+.visitor-map-marker__fallback[hidden] { display: none; }
+.visitor-map-marker__text {
+  display: grid;
+  min-width: 0;
+  line-height: 1.15;
+}
+.visitor-map-marker__name {
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+}
+.visitor-map-marker__location {
+  overflow: hidden;
+  color: #475569;
+  font-size: 10px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+.visitor-map-marker--alert { --visitor-color: #ef4444; }
+.visitor-map-marker--alert .visitor-map-marker__card { background: #fef2f2; }
+.visitor-map-marker--alert .visitor-map-marker__location { color: #b91c1c; font-weight: 700; }
+.visitor-map-marker--alert .visitor-map-marker__pulse {
+  border-color: #ef4444;
+  animation: visitor-alert-pulse 900ms ease-out infinite;
+}
+@keyframes visitor-alert-pulse {
+  0% { opacity: 0.95; transform: scale(0.85); }
+  75%, 100% { opacity: 0; transform: scale(2.2); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .visitor-map-marker--alert .visitor-map-marker__pulse { animation: none; }
+}

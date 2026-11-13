@@ -19,6 +19,7 @@ import { outdoorLocationFromMapPoint, type OutdoorLocation } from "@/lib/outdoor
 import type { SavedOutdoorLocation } from "@/lib/saved-outdoor-locations";
 import { loadMapLibre } from "@/lib/maplibre-loader";
 import type { OutdoorNavigationOverlay } from "@/lib/outdoor-navigation";
+import {visitorInitials,type RestrictedRoomCandidate,type VisitorMapSnapshot} from "@/lib/visitor-simulation";
 
 export type MapStatus = "loading" | "ready" | "error";
 export type FloorPlacementPreview = {
@@ -41,6 +42,15 @@ const floorGeometrySourceId=(id:string)=>`placed-floor-geometry:${id}`;
 const floorGeometryLayerId=(id:string,name:string)=>`floor:${id}:${name}`;
 const SELECTION_FRAME_SOURCE="selected-indoor-resize-frame";
 const OUTDOOR_ROUTE_SOURCE="outdoor-indoor-navigation-geometry";
+const VISITOR_TRAIL_SOURCE="visitor-path-history";
+const VISITOR_TRAIL_LAYERS=["visitor-path-history-halo","visitor-path-history-line"] as const;
+/** Slightly shorter than the 2 s fix interval so each glide finishes first. */
+const VISITOR_GLIDE_MS=1800;
+type VisitorAnimation={
+  id:string;color:string;floorRecordId:string;fixSequence:number;startedAt:number;
+  path:[number,number][];lengths:number[];base:[number,number][];
+  history:[number,number][];current:[number,number];
+};
 const OUTDOOR_ROUTE_LAYERS=[
   "outdoor-route-halo","outdoor-route-line","outdoor-route-markers","outdoor-route-marker-labels",
 ] as const;
@@ -92,6 +102,8 @@ type Props = {
   proportionalResize: boolean;
   transformMode: "resize"|"skew";
   outdoorRouteOverlay: OutdoorNavigationOverlay|null;
+  visitorSnapshots: VisitorMapSnapshot[];
+  restrictedRoom: (RestrictedRoomCandidate&{active:boolean})|null;
   onNavigationRoomPick: (floorId:string,roomId:string,endpoint:"start"|"end")=>void;
   onStatusChange: (status: MapStatus) => void;
 };
@@ -101,7 +113,7 @@ export function MapCanvas({
   onSavedLocationSelect,pickOnMap,onMapPointPick,onStatusChange,
   placementPreviews,editableFloorId,placingFloor,onPlacementPointPick,
   onPlacementTransform,proportionalResize,transformMode,
-  outdoorRouteOverlay,onNavigationRoomPick,
+  outdoorRouteOverlay,visitorSnapshots,restrictedRoom,onNavigationRoomPick,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [styleReadyKey,setStyleReadyKey] = useState(0);
@@ -115,6 +127,9 @@ export function MapCanvas({
   const locationMarkerRef = useRef<MapLibreMarker | null>(null);
   const savedMarkersRef = useRef<MapLibreMarker[]>([]);
   const deviceMarkersRef = useRef<MapLibreMarker[]>([]);
+  const visitorMarkersRef=useRef<Map<string,MapLibreMarker>>(new Map());
+  const visitorAnimationsRef=useRef<Map<string,VisitorAnimation>>(new Map());
+  const visitorFrameRef=useRef(0);
   const floorHandleRef = useRef<MapLibreMarker | null>(null);
   const transformHandlesRef=useRef<MapLibreMarker[]>([]);
   // Active marker must not be re-anchored by React while MapLibre drags it.
@@ -132,10 +147,14 @@ export function MapCanvas({
   const editableFloorIdRef=useRef(editableFloorId);
   const latestPreviewsRef=useRef(placementPreviews);
   const latestRouteRef=useRef(outdoorRouteOverlay);
+  const latestVisitorsRef=useRef(visitorSnapshots);
   // Stable across mousemove transform updates; changes only when floor
   // visibility or the selected floor changes.
   const overlaySetKey=placementPreviews.map(p=>`${p.floorId}:${p.showImage}`).join("|");
   const hasOutdoorRoute=Boolean(outdoorRouteOverlay?.features.length);
+  const restrictedFloorRecordId=restrictedRoom?.floorRecordId??null;
+  const restrictedRoomId=restrictedRoom?.roomId??null;
+  const restrictedActive=restrictedRoom?.active??false;
 
   useEffect(() => {
     statusCallbackRef.current = onStatusChange;
@@ -270,6 +289,14 @@ export function MapCanvas({
           paint:{"fill-color":"#3b82f6","fill-opacity":0.23}});
         map.addLayer({id:id("room-outline"),type:"line",source,filter:category("room"),
           paint:{"line-color":"#1d4ed8","line-width":2.4}});
+        const restrictedFilter:FilterSpecification=["all",
+          ["==",["get","category"],"room"],
+          ["==",["get","id"],"__no-restricted-room__"]];
+        map.addLayer({id:id("restricted-room-fill"),type:"fill",source,
+          filter:restrictedFilter,paint:{"fill-color":"#ef4444","fill-opacity":0.16}});
+        map.addLayer({id:id("restricted-room-outline"),type:"line",source,
+          filter:restrictedFilter,paint:{"line-color":"#b91c1c","line-width":3,
+            "line-opacity":0.9,"line-dasharray":[2,1]}});
         map.addLayer({id:id("walkable-outline"),type:"line",source,filter:category("walkable"),
           paint:{"line-color":"#047857","line-width":2.4}});
         map.addLayer({id:id("doorway-fill"),type:"fill",source,filter:category("doorway"),
@@ -304,7 +331,7 @@ export function MapCanvas({
       // several saved floors are visible at the same time.
       for(const preview of shown){
         for(const suffix of ["camera-fov-fill","camera-fov-outline","walkable-fill","room-fill","room-outline",
-          "walkable-outline","doorway-fill","doorway-border","stairs-fill",
+          "restricted-room-fill","restricted-room-outline","walkable-outline","doorway-fill","doorway-border","stairs-fill",
           "stairs-outline","devices","door-symbol","names"]){
           const layer=floorGeometryLayerId(preview.floorId,suffix);
           if(map.getLayer(layer))map.moveLayer(layer);
@@ -368,6 +395,41 @@ export function MapCanvas({
       }
     }
   },[placementPreviews,overlaySetKey,editableFloorId,styleReadyKey]);
+
+  // A dedicated overlay identifies the room selected for this demo session.
+  // Its filter always targets category=room, so corridors and connectors can
+  // never become restricted because of a coincident feature identifier.
+  useEffect(()=>{
+    const map=mapRef.current;
+    if(!map)return;
+    const applyOpacity=(bright:boolean)=>{
+      for(const preview of placementPreviews){
+        const fill=floorGeometryLayerId(preview.floorId,"restricted-room-fill");
+        const outline=floorGeometryLayerId(preview.floorId,"restricted-room-outline");
+        const selected=preview.floorId===restrictedFloorRecordId&&Boolean(restrictedRoomId);
+        const filter:FilterSpecification=["all",
+          ["==",["get","category"],"room"],
+          ["==",["get","id"],selected?restrictedRoomId!:"__no-restricted-room__"],
+        ];
+        if(map.getLayer(fill)){
+          map.setFilter(fill,filter);
+          map.setPaintProperty(fill,"fill-opacity",selected?
+            restrictedActive?(bright?0.62:0.25):0.16:0);
+        }
+        if(map.getLayer(outline)){
+          map.setFilter(outline,filter);
+          map.setPaintProperty(outline,"line-width",selected&&restrictedActive&&bright?5:3);
+          map.setPaintProperty(outline,"line-opacity",selected?1:0);
+        }
+      }
+    };
+    let bright=true;
+    applyOpacity(bright);
+    if(!restrictedActive)return;
+    const timer=window.setInterval(()=>{bright=!bright;applyOpacity(bright);},420);
+    return ()=>window.clearInterval(timer);
+  },[placementPreviews,overlaySetKey,styleReadyKey,restrictedFloorRecordId,
+    restrictedRoomId,restrictedActive]);
 
   // Validated indoor routes render as independent geographic floor segments.
   // Never draw an arbitrary street-level straight line between different floors.
@@ -673,7 +735,190 @@ export function MapCanvas({
     return ()=>{cancelled=true;};
   },[placementPreviews,styleReadyKey,renderPlacedDevices]);
 
-  // These pins anchor saved locations; each associated floor overlay is aligned independently.
+  // Visitors are projected with the SAME placement used to draw their floor,
+  // so the dot always lands on that floor's drawn polygons. A visitor whose
+  // floor is not rendered on the map is not shown at all.
+  const projectVisitorPath=useCallback((
+    snapshot:VisitorMapSnapshot,points:ReadonlyArray<{x:number;y:number}>,
+  ):[number,number][]|null=>{
+    const preview=latestPreviewsRef.current.find(p=>p.floorId===snapshot.floorRecordId);
+    if(!preview)return null;
+    try{
+      return points.map(point=>indoorPointToLngLat(point,preview.placement,
+        preview.imageWidth,preview.imageHeight));
+    }catch{return null;}
+  },[]);
+
+  const renderVisitorTrails=useCallback((map:MapLibreMap)=>{
+    const source=map.getSource(VISITOR_TRAIL_SOURCE) as GeoJSONSource|undefined;
+    if(!source)return;
+    const features=[...visitorAnimationsRef.current.values()].flatMap(animation=>{
+      const coordinates=[...animation.history,animation.current];
+      return coordinates.length>=2?[{type:"Feature" as const,
+        properties:{id:animation.id,color:animation.color},
+        geometry:{type:"LineString" as const,coordinates}}]:[];
+    });
+    void source.setData({type:"FeatureCollection",features});
+  },[]);
+
+  /** Glide every marker along the walked path between two GPS fixes. The
+   * marker follows the path's corners, so it never cuts across a wall. */
+  const runVisitorAnimation=useCallback((map:MapLibreMap)=>{
+    if(visitorFrameRef.current)return;
+    let lastTrailUpdate=0;
+    const step=(time:number)=>{
+      visitorFrameRef.current=0;
+      let active=false;
+      for(const animation of visitorAnimationsRef.current.values()){
+        const marker=visitorMarkersRef.current.get(animation.id);
+        if(!marker)continue;
+        const progress=Math.min(1,(time-animation.startedAt)/VISITOR_GLIDE_MS);
+        const total=animation.lengths.at(-1)??0;
+        const target=total*progress;
+        let index=1;
+        while(index<animation.lengths.length-1&&animation.lengths[index]<target)index++;
+        const a=animation.path[index-1]??animation.path[0];
+        const b=animation.path[index]??a;
+        const span=(animation.lengths[index]??0)-(animation.lengths[index-1]??0);
+        const ratio=span>0?(target-(animation.lengths[index-1]??0))/span:1;
+        animation.current=[a[0]+(b[0]-a[0])*ratio,a[1]+(b[1]-a[1])*ratio];
+        animation.history=animation.base.concat(animation.path.slice(0,index));
+        marker.setLngLat(animation.current);
+        if(progress<1)active=true;
+      }
+      if(time-lastTrailUpdate>120||!active){renderVisitorTrails(map);lastTrailUpdate=time;}
+      if(active)visitorFrameRef.current=requestAnimationFrame(step);
+    };
+    visitorFrameRef.current=requestAnimationFrame(step);
+  },[renderVisitorTrails]);
+
+  const renderVisitorMarkers=useCallback((
+    map:MapLibreMap,lib:Awaited<ReturnType<typeof loadMapLibre>>,
+    snapshots:VisitorMapSnapshot[],
+  )=>{
+    const projected=snapshots.flatMap(visitor=>{
+      const segment=projectVisitorPath(visitor,visitor.segment.length?visitor.segment:[visitor.point]);
+      const trail=projectVisitorPath(visitor,visitor.trail);
+      return segment&&trail&&segment.length?[{visitor,segment,trail}]:[];
+    });
+    const activeIds=new Set(projected.map(item=>item.visitor.id));
+    for(const [id,marker] of visitorMarkersRef.current){
+      if(activeIds.has(id))continue;
+      marker.remove();
+      visitorMarkersRef.current.delete(id);
+      visitorAnimationsRef.current.delete(id);
+    }
+    for(const {visitor,segment,trail} of projected){
+      let marker=visitorMarkersRef.current.get(visitor.id);
+      const end=segment.at(-1)!;
+      if(!marker){
+        const element=document.createElement("div");
+        element.className="visitor-map-marker";
+        element.dataset.visitorId=visitor.id;
+        element.setAttribute("role","img");
+        const pulse=document.createElement("span");
+        pulse.className="visitor-map-marker__pulse";
+        const dot=document.createElement("span");
+        dot.className="visitor-map-marker__dot";
+        const card=document.createElement("span");
+        card.className="visitor-map-marker__card";
+        const fallback=document.createElement("span");
+        fallback.className="visitor-map-marker__fallback";
+        fallback.textContent=visitorInitials(visitor.fullName);
+        const image=document.createElement("img");
+        image.className="visitor-map-marker__avatar";
+        image.src=visitor.avatarUrl;
+        image.alt="";
+        image.draggable=false;
+        image.addEventListener("error",()=>{
+          image.hidden=true;
+          fallback.hidden=false;
+        },{once:true});
+        fallback.hidden=true;
+        const text=document.createElement("span");
+        text.className="visitor-map-marker__text";
+        const name=document.createElement("span");
+        name.className="visitor-map-marker__name";
+        name.textContent=visitor.fullName;
+        const location=document.createElement("span");
+        location.className="visitor-map-marker__location";
+        text.append(name,location);
+        card.append(fallback,image,text);
+        element.append(pulse,dot,card);
+        // The 14px dot is the marker box, so its centre is the exact fix.
+        marker=new lib.Marker({element,anchor:"center"}).setLngLat(end).addTo(map);
+        element.style.zIndex="12";
+        visitorMarkersRef.current.set(visitor.id,marker);
+      }
+      const element=marker.getElement();
+      element.style.setProperty("--visitor-color",visitor.color);
+      element.classList.toggle("visitor-map-marker--alert",visitor.alerting);
+      const location=element.querySelector<HTMLElement>(".visitor-map-marker__location");
+      if(location)location.textContent=`${visitor.locationName} · ${visitor.floorName}`;
+      element.setAttribute("aria-label",`${visitor.fullName} in ${visitor.locationName}, ${visitor.floorName}${
+        visitor.alerting?" (restricted room)":""}`);
+      element.title=`${visitor.fullName} — ${visitor.locationName} · ${visitor.floorName}`;
+
+      const previous=visitorAnimationsRef.current.get(visitor.id);
+      if(previous&&previous.fixSequence===visitor.fixSequence)continue;
+      // The glide covers only this fix's walked path; the trail before it is
+      // static. A floor change (new trail) or first fix jumps straight there.
+      const path=previous&&previous.floorRecordId===visitor.floorRecordId&&segment.length>1?
+        segment:[end];
+      const lengths=[0];
+      for(let index=1;index<path.length;index++){
+        const [ax,ay]=path[index-1],[bx,by]=path[index];
+        lengths.push(lengths[index-1]+Math.hypot(bx-ax,by-ay));
+      }
+      const base=trail.slice(0,Math.max(0,trail.length-path.length));
+      visitorAnimationsRef.current.set(visitor.id,{
+        id:visitor.id,color:visitor.color,floorRecordId:visitor.floorRecordId,
+        fixSequence:visitor.fixSequence,startedAt:performance.now(),
+        path,lengths,base,history:base,current:path[0],
+      });
+      if(path.length===1)marker.setLngLat(end);
+    }
+    runVisitorAnimation(map);
+  },[projectVisitorPath,runVisitorAnimation]);
+  useEffect(()=>{latestVisitorsRef.current=visitorSnapshots;},[visitorSnapshots]);
+  useEffect(()=>{
+    const map=mapRef.current;
+    if(!map)return;
+    let cancelled=false;
+    void loadMapLibre().then(lib=>{
+      if(!cancelled&&mapRef.current===map)
+        renderVisitorMarkers(map,lib,visitorSnapshots);
+    });
+    return ()=>{cancelled=true;};
+  },[visitorSnapshots,styleReadyKey,renderVisitorMarkers]);
+
+  // Path history: a thin line per visitor, kept above the indoor floor layers.
+  useEffect(()=>{
+    const map=mapRef.current;
+    if(!map||!map.getStyle())return;
+    try{
+      if(!map.getSource(VISITOR_TRAIL_SOURCE))map.addSource(VISITOR_TRAIL_SOURCE,
+        {type:"geojson",data:{type:"FeatureCollection",features:[]}});
+      if(!map.getLayer(VISITOR_TRAIL_LAYERS[0]))map.addLayer({id:VISITOR_TRAIL_LAYERS[0],
+        type:"line",source:VISITOR_TRAIL_SOURCE,layout:{"line-join":"round","line-cap":"round"},
+        paint:{"line-color":"#ffffff","line-width":5,"line-opacity":0.85}});
+      if(!map.getLayer(VISITOR_TRAIL_LAYERS[1]))map.addLayer({id:VISITOR_TRAIL_LAYERS[1],
+        type:"line",source:VISITOR_TRAIL_SOURCE,layout:{"line-join":"round","line-cap":"round"},
+        paint:{"line-color":["get","color"],"line-width":2.5,"line-opacity":0.9,
+          "line-dasharray":[1.5,1]}});
+      for(const id of VISITOR_TRAIL_LAYERS)map.moveLayer(id);
+      renderVisitorTrails(map);
+    }catch(error){
+      console.error("Could not display visitor path history:",error);
+    }
+  },[styleReadyKey,overlaySetKey,editableFloorId,renderVisitorTrails]);
+  useEffect(()=>()=>{
+    if(visitorFrameRef.current)cancelAnimationFrame(visitorFrameRef.current);
+    visitorFrameRef.current=0;
+  },[]);
+
+  // Unselected pins remain available for switching locations. The active pin is
+  // hidden so it cannot cover that location's indoor overlays.
   const renderSavedMarkers=useCallback((
     map:MapLibreMap,lib:Awaited<ReturnType<typeof loadMapLibre>>,
     places:SavedOutdoorLocation[],selectedId:string|null,
@@ -681,7 +926,8 @@ export function MapCanvas({
     savedMarkersRef.current.forEach(marker=>marker.remove());
     savedMarkersRef.current=[];
     for(const place of places){
-      const marker=new lib.Marker({color:place.id===selectedId?"#2563eb":"#4f46e5"})
+      if(place.id===selectedId)continue;
+      const marker=new lib.Marker({color:"#4f46e5"})
         .setLngLat([place.longitude,place.latitude]).addTo(map);
       const element=marker.getElement();
       element.setAttribute("role","button");
@@ -689,7 +935,7 @@ export function MapCanvas({
       element.setAttribute("aria-label",`Open saved location ${place.name}`);
       element.title=`Fly to ${place.name}`;
       element.style.cursor="pointer";
-      element.style.zIndex=place.id===selectedId?"6":"5";
+      element.style.zIndex="5";
       const select=()=>onSavedLocationSelectRef.current(place);
       element.addEventListener("click",event=>{event.stopPropagation();select();});
       element.addEventListener("keydown",event=>{
@@ -703,7 +949,7 @@ export function MapCanvas({
 
   useEffect(()=>{
     const map=mapRef.current;
-    if(!map||!map.loaded())return;
+    if(!map)return;
     let cancelled=false;
     void loadMapLibre().then(lib=>{
       if(cancelled||mapRef.current!==map)return;
@@ -727,9 +973,11 @@ export function MapCanvas({
     if (!map || !focusTarget || appliedFocusRequestRef.current===focusTarget.requestId) return;
     let cancelled=false;
     void loadMapLibre().then(lib=>{
-      if(cancelled || mapRef.current!==map || !map.loaded())return;
+      if(cancelled || mapRef.current!==map)return;
       locationMarkerRef.current?.remove();
       locationMarkerRef.current=null;
+      renderSavedMarkers(map,lib,latestSavedLocationsRef.current,
+        latestSelectedSavedIdRef.current);
       // A saved location already has its own clickable pin. Do not stack a
       // second (search-result) marker on top of it.
       if(!latestSavedLocationsRef.current.some(place=>place.id===focusTarget.id)){
@@ -747,10 +995,12 @@ export function MapCanvas({
       });
     });
     return ()=>{cancelled=true;};
-  },[focusTarget]);
+  },[focusTarget,renderSavedMarkers]);
 
   useEffect(() => {
     let cancelled = false;
+    const visitorMarkers=visitorMarkersRef.current;
+    const visitorAnimations=visitorAnimationsRef.current;
 
     async function initialize() {
       try {
@@ -817,6 +1067,7 @@ export function MapCanvas({
         });
         map.on("load", ()=>{
           renderPlacedDevices(map,maplibregl,latestPreviewsRef.current);
+          renderVisitorMarkers(map,maplibregl,latestVisitorsRef.current);
           renderSavedMarkers(map,maplibregl,latestSavedLocationsRef.current,
             latestSelectedSavedIdRef.current);
           applyInitialSearch();
@@ -840,6 +1091,9 @@ export function MapCanvas({
       savedMarkersRef.current=[];
       deviceMarkersRef.current.forEach(marker=>marker.remove());
       deviceMarkersRef.current=[];
+      visitorMarkers.forEach(marker=>marker.remove());
+      visitorMarkers.clear();
+      visitorAnimations.clear();
       floorHandleRef.current?.remove();
       floorHandleRef.current=null;
       transformHandlesRef.current.forEach(handle=>handle.remove());
@@ -847,7 +1101,7 @@ export function MapCanvas({
       mapRef.current?.remove();
       mapRef.current = null;
     };
-  }, [renderSavedMarkers,renderPlacedDevices]);
+  }, [renderSavedMarkers,renderPlacedDevices,renderVisitorMarkers]);
 
   useEffect(() => {
     latestStyleRef.current = styleUrl;

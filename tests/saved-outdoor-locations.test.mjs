@@ -58,11 +58,12 @@ test("location records use independent IndexedDB, never overwriting existing sav
   assert.match(locationStore,/store\.put\(place\)/);
   assert.match(locationStore,/store\.delete\(id\)/);
 });
-test("the map renders saved pins and makes them keyboard/click selectable",()=>{
+test("the map renders unselected saved pins and makes them keyboard/click selectable",()=>{
   const canvas=readFileSync(new URL("../src/components/map/map-canvas.tsx",import.meta.url),"utf8");
   const workspace=readFileSync(new URL("../src/components/map/map-workspace.tsx",import.meta.url),"utf8");
   const manager=readFileSync(new URL("../src/components/map/outdoor-location-manager.tsx",import.meta.url),"utf8");
   assert.match(canvas,/renderSavedMarkers\(map,maplibregl,latestSavedLocationsRef\.current/);
+  assert.match(canvas,/if\(place\.id===selectedId\)continue;/);
   assert.match(canvas,/element\.addEventListener\("click"/);
   assert.match(canvas,/event\.key==="Enter"\|\|event\.key===" "/);
   assert.match(canvas,/onSavedLocationSelectRef\.current\(place\)/);
@@ -71,4 +72,15 @@ test("the map renders saved pins and makes them keyboard/click selectable",()=>{
   assert.match(workspace,/setSelectedSavedLocationId\(null\);setResetStreet/);
   assert.match(manager,/Add this location/);
   assert.match(manager,/Delete/);
+});
+
+test("selecting a saved location zooms to its exact geographic anchor",()=>{
+  const workspace=readFileSync(new URL("../src/components/map/map-workspace.tsx",import.meta.url),"utf8");
+  const canvas=readFileSync(new URL("../src/components/map/map-canvas.tsx",import.meta.url),"utf8");
+  assert.match(workspace,/longitude:location\.longitude,/);
+  assert.match(workspace,/latitude:location\.latitude,/);
+  assert.match(workspace,/zoom:Math\.max\(19,location\.zoom\),/);
+  assert.doesNotMatch(workspace,/longitude:centre\?\.longitude\?\?location\.longitude/);
+  assert.doesNotMatch(canvas,/if\(!map\|\|!map\.loaded\(\)\)return;/);
+  assert.match(canvas,/renderSavedMarkers\(map,lib,latestSavedLocationsRef\.current,\s*latestSelectedSavedIdRef\.current\);[\s\S]*?map\.flyTo\(\{/);
 });
